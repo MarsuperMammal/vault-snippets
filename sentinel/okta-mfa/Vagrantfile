@@ -1,0 +1,162 @@
+$base = <<BASE
+sudo apt-get install -q -y wget unzip ca-certificates
+sudo curl -s -L https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64 > /usr/local/bin/jq
+sudo chmod +x /usr/local/bin/jq
+BASE
+
+$vault_install = <<VAULT_INST
+cd /vagrant
+sudo chmod +x vault
+sudo cp vault /usr/local/bin
+sudo chmod 0755 /usr/local/bin/vault
+sudo chown root:root /usr/local/bin/vault
+VAULT_INST
+
+$vault_env = <<VAULT_ENV
+sudo cat << EOF > /etc/profile.d/vault.sh
+export VAULT_ADDR="http://192.168.50.100:8200"
+export VAULT_SKIP_VERIFY=true
+EOF
+VAULT_ENV
+
+$vault_run = <<VAULT_RUN
+nohup /usr/local/bin/vault server -dev \
+  -dev-root-token-id="password" \
+  -dev-listen-address="0.0.0.0:8200" 0<&- &>/dev/null &
+VAULT_RUN
+
+$hosts_file = <<HOSTS_FILE
+sudo cat << EOF >> /etc/hosts
+192.168.50.100  vault vault.example.com
+EOF
+HOSTS_FILE
+
+$okta = <<OKTA
+
+#************** EDIT THESE FOR YOUR ENV **************
+OKTA_USERNAME=me
+OKTA_DOMAIN=hashicorp.com
+OKTA_ORG=<tenant>
+OKTA_API_TOKEN=<token>
+#************** EDIT THESE FOR YOUR ENV **************
+
+
+#Generic Secrets
+vault write secret/me username=${OKTA_USERNAME} password=supersecret
+vault mount -path=supersecret generic
+vault write supersecret/admin admin_user=root admin_password=P@55w3rd
+vault mount -path=verysecret generic
+vault write verysecret/sensitive key=value password=35616164316lasfdasfasdfasdfasdfasf
+
+#Generic policies
+echo '
+path "sys/mounts" {
+  capabilities = ["list","read"]
+}
+path "secret/*" {
+  capabilities = ["list", "read"]
+}
+path "secret/me" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+  mfa_methods = ["okta"]
+}
+path "supersecret/*" {
+  capabilities = ["list", "read"]
+}' | vault policy-write okta -
+
+#Enable Okta
+vault auth-enable okta
+
+#Create the Okta mfa config
+vault write auth/okta/config \
+  organization="${OKTA_ORG}" \
+  base_url="oktapreview.com"\
+  api_token="${OKTA_API_TOKEN}"
+#vault write auth/okta/users/${OKTA_USERNAME}@${OKTA_DOMAIN} policies=okta
+vault write auth/okta/groups/okta policies=okta
+export OKTA_ACCESSOR=$(curl --header "X-Vault-Token: password"  http://localhost:8200/v1/sys/auth | jq -r '."okta/".accessor')
+
+#Add the mount
+cat <<EOM > okta_mfa.json
+{
+  "mount_accessor": "${OKTA_ACCESSOR}",
+  "org_name": "${OKTA_ORG}",
+  "api_token": "${OKTA_API_TOKEN}",
+  "username_format": "{{alias.name}}",
+  "base_url": "oktapreview.com"
+}
+EOM
+
+
+cat <<EOM > okta_mfa.json
+{
+  "mount_accessor": "${OKTA_ACCESSOR}",
+  "org_name": "${OKTA_ORG}",
+  "api_token": "${OKTA_API_TOKEN}",
+  "username_format": "{{alias.name}}",
+  "base_url": "oktapreview.com"
+}
+EOM
+
+#Following policy is Base64 encoded below in policy block
+: '
+import "strings"
+
+# Require OKTA MFA validation to succeed
+okta_valid = rule {
+    mfa.methods.okta.valid
+}
+
+main = rule when strings.has_prefix(request.path, "auth/okta/login") {
+    okta_valid
+}
+'
+
+cat <<EOM > okta_sentinel.json
+{
+  "policy": "aW1wb3J0ICJzdHJpbmdzIg0KDQojIFJlcXVpcmUgT0tUQSBNRkEgdmFsaWRhdGlvbiB0byBzdWNjZWVkDQpva3RhX3ZhbGlkID0gcnVsZSB7DQogICAgbWZhLm1ldGhvZHMub2t0YS52YWxpZA0KfQ0KDQptYWluID0gcnVsZSB3aGVuIHN0cmluZ3MuaGFzX3ByZWZpeChyZXF1ZXN0LnBhdGgsICJhdXRoL29rdGEvbG9naW4iKSB7DQogICAgb2t0YV92YWxpZA0KfQ==",
+  "paths": ["auth/okta/login/*"],
+  "enforcement_level": "hard-mandatory"
+}
+EOM
+
+#Post the config
+curl \
+    --header "X-Vault-Token: password" \
+    --request POST \
+    --data @okta_mfa.json \
+    http://localhost:8200/v1/sys/mfa/method/okta/okta
+
+#Add the sentinel policy
+curl  \
+    --header "X-Vault-Token: password" \
+    --request PUT \
+    --data @okta_sentinel.json \
+    http://localhost:8200/v1/sys/policies/egp/okta
+
+#Test locally
+#vault auth -method=okta username=me@hashicorp.com
+#vault read secret/me
+OKTA
+
+Vagrant.configure("2") do |config|
+  config.vm.provider "virtualbox" do |vb|
+    vb.customize ["modifyvm", :id, "--memory", "512"]
+    vb.customize ["modifyvm", :id, "--cpus", "1"]
+    vb.customize ["modifyvm", :id, "--cpuexecutioncap", "50"]
+    vb.customize ["modifyvm", :id, "--chipset", "ich9"]
+    vb.customize ["modifyvm", :id, "--ioapic", "on"]
+  end
+  config.vm.define "vault" do |vault|
+    vault.vm.network :private_network, ip: "192.168.50.100"
+    vault.vm.network :forwarded_port, guest: 8200, host: 8200
+    vault.vm.box = "bento/ubuntu-16.04"
+    vault.vm.hostname = "vault"
+    vault.vm.provision "shell", inline: $base
+    vault.vm.provision "shell", inline: $vault_install
+    vault.vm.provision "shell", inline: $vault_env
+    vault.vm.provision "shell", inline: $vault_run, run: "always"
+    vault.vm.provision "shell", inline: $okta, run: "always"
+    vault.vm.provision "shell", inline: $hosts_file
+  end
+end

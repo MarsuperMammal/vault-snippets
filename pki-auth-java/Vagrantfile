@@ -1,0 +1,124 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+$base = <<BASE
+sudo yum update
+sudo yum install -y unzip curl vim java-1.8.0-openjdk-devel
+wget -O jq https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64
+chmod +x ./jq
+cp jq /usr/bin
+BASE
+
+$hosts = <<HOSTS
+sudo cat << EOF >> /etc/hosts
+172.20.20.10  vault vault.hashicorp.com
+172.20.20.11  spring spring.hashicorp.com
+EOF
+HOSTS
+
+$install_pki = <<INSTALL_PKI
+rm -rf /vagrant/certs
+mkdir /vagrant/certs
+cd /vagrant/certs
+#CA
+openssl req -x509 -new -nodes -newkey rsa:4096 -out rootCA.pem -keyout rootCA.key -days 500 -subj "/C=US/ST=CA/L=SF/O=Hashicorp/CN=hashicorp.com"
+#Vault
+openssl genrsa -out vault.key 2048
+openssl req -new -newkey rsa:4096 -key vault.key \
+    -out vault.csr \
+    -subj "/C=US/ST=CA/L=SF/O=Hashicorp/CN=vault.hashicorp.com"
+openssl x509 -req -in vault.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out vault.crt
+#Spring
+openssl genrsa -out spring.key 2048
+openssl req -new -newkey rsa:4096 -key spring.key \
+    -out spring.csr \
+    -subj "/C=US/ST=CA/L=SF/O=Hashicorp/CN=spring.hashicorp.com"
+openssl x509 -req -in spring.csr -CA rootCA.pem -CAkey rootCA.key -CAserial rootCA.srl -out spring.crt
+#JKS
+openssl pkcs12 -export -in spring.crt -inkey spring.key -name spring -out spring.p12 -password pass:Password1
+keytool -importkeystore -deststorepass Password1 -destkeystore keystore.jks -srckeystore spring.p12 -srcstoretype PKCS12 --srcstorepass Password1
+keytool -import -file rootCA.pem -alias ca -keystore keystore.jks -storepass Password1 -noprompt
+INSTALL_PKI
+
+$install_anchor = <<INSTALL_ANCHOR
+sudo cp /vagrant/certs/rootCA.pem /etc/pki/ca-trust/source/anchors/rootCA.pem
+sudo update-ca-trust
+INSTALL_ANCHOR
+
+$spring_svc = <<SPRING_SVC
+sudo cat << EOF > /etc/systemd/system/spring.service
+[Unit]
+Description=spring
+After=syslog.target
+
+[Service]
+User=root
+ExecStart=/var/spring/vault-pki-auth-1.0.jar
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
+EOF
+SPRING_SVC
+
+$spring_deploy = <<SPRING_DEPLOY
+wget http://repos.fedorapeople.org/repos/dchen/apache-maven/epel-apache-maven.repo -O /etc/yum.repos.d/epel-apache-maven.repo
+yum install -y apache-maven
+sudo cp /vagrant/certs/keystore.jks /vagrant/src/main/resources/keystore.jks
+cd /vagrant
+mvn install
+sudo mkdir -p /var/spring
+sudo cp /vagrant/target/vault-pki-auth-1.0.jar /var/spring/vault-pki-auth-1.0.jar
+sudo cp /vagrant/bootstrap.yaml /var/spring/bootstrap.yaml
+sudo systemctl enable spring.service
+sudo service spring restart
+SPRING_DEPLOY
+
+$vault_bin = <<VAULT_BIN
+#Get Vault
+VAULT=0.11.0
+VAULT_ZIP=/vagrant/bin/vault_${VAULT}_linux_amd64.zip
+if [ ! -f $VAULT_ZIP ]; then
+  mkdir -p /vagrant/bin
+  wget https://releases.hashicorp.com/vault/${VAULT}/vault_${VAULT}_linux_amd64.zip --quiet -O $VAULT_ZIP
+fi
+cd /tmp
+unzip -q $VAULT_ZIP >/dev/null
+sudo chmod +x vault
+sudo mv vault /usr/bin
+sudo chmod 0755 /usr/bin/vault
+sudo chown root:root /usr/bin/vault
+VAULT_BIN
+
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+  config.vm.box = "bento/centos-7.4"
+
+  config.vm.define "vault" do |vault|
+      vault.vm.hostname = "vault.hashicorp.com"
+      vault.vm.network "private_network", ip: "172.20.20.10"
+      vault.vm.network "forwarded_port", guest: 8200, host: 8200
+      vault.vm.provision "shell", inline: $base
+      vault.vm.provision "shell", inline: $hosts
+      vault.vm.provision "shell", inline: $install_pki
+      vault.vm.provision "shell", inline: $install_anchor
+      vault.vm.provision "docker" do |d|
+        d.run "vault",
+          image: "vault:0.11.1",
+          cmd: "server",
+          args: "--net=host --cap-add=IPC_LOCK -v /vagrant/vault.hcl:/vault/config/vault.hcl -v /vagrant/certs/vault.crt:/vault/config/vault.crt -v /vagrant/certs/vault.key:/vault/config/vault.key -d"
+        end
+      vault.vm.provision "shell", inline: $vault_bin
+  end
+  config.vm.define "spring" do |spring|
+      spring.vm.hostname = "spring.hashicorp.com"
+      spring.vm.network "private_network", ip: "172.20.20.11"
+      spring.vm.network "forwarded_port", guest: 8080, host: 8080
+      spring.vm.provision "shell", inline: $base
+      spring.vm.provision "shell", inline: $hosts
+      spring.vm.provision "shell", inline: $install_anchor
+      spring.vm.provision "spring svc", type: "shell", inline: $spring_svc
+      spring.vm.provision "spring deploy", type: "shell", inline: $spring_deploy
+  end
+end

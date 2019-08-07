@@ -1,0 +1,11 @@
+path "auth/approle/role/springboot/secret-id" {
+  capabilities = ["update"]
+}
+
+path "secret/vault-si-boot" {
+  capabilities = ["list","read"]
+}
+
+path "secret/*" {
+  capabilities = ["list","read"]
+}

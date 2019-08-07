@@ -1,0 +1,5 @@
+base:
+  '*':
+  - base
+  'springboot':
+  - springboot

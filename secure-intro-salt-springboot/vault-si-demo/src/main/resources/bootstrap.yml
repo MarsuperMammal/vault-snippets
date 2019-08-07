@@ -1,0 +1,12 @@
+spring:
+    application:
+        name: vault-si-boot
+    cloud:
+        vault:
+            authentication: APPROLE
+            app-role:
+                role-id: ${VAULT_ROLE_ID}
+                secret-id: ${VAULT_SECRET_ID}
+            scheme: http
+            host: 192.168.50.101
+            fail-fast: true

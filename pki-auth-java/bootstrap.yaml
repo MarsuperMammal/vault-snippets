@@ -1,0 +1,11 @@
+spring.cloud.vault:
+    host: vault.hashicorp.com
+    port: 8200
+    scheme: https
+    authentication: CERT
+    ssl:
+        trust-store: classpath:keystore.jks
+        trust-store-password: Password1
+        key-store: classpath:keystore.jks
+        key-store-password: Password1
+        cert-auth-path: cert

@@ -1,0 +1,13 @@
+[Unit]
+Description=spring-si-boot
+After=syslog.target
+
+[Service]
+User=root
+EnvironmentFile=/etc/role-id
+EnvironmentFile=/etc/secret-id
+ExecStart=/var/spring-si-boot/vault-si-demo-0.0.1-SNAPSHOT.jar
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
